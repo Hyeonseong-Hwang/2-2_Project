@@ -40,12 +40,25 @@ def _call(endpoint: str, email: str, password: str) -> dict:
     return data
 
 
-def _load_user(id_token: str) -> dict:
+def _load_user(id_token: str, status=None) -> dict:
+    say = status.write if status else (lambda *_: None)
+
+    say("2/3 서버에서 토큰 검증 중...")
     get_app()
     decoded = admin_auth.verify_id_token(id_token)   # 서버에서 토큰 위조 여부 확인
     uid = decoded["uid"]
-    doc = get_db().collection("users").document(uid).get()
-    profile = doc.to_dict() if doc.exists else {}
+
+    say("3/3 Firestore에서 역할 정보 읽는 중...")
+    try:
+        doc = get_db().collection("users").document(uid).get(timeout=10)
+    except Exception as e:
+        raise RuntimeError(
+            "Firestore 응답이 없습니다(10초 초과). Firestore Database 생성 여부, "
+            "서비스 계정 키의 프로젝트, 네트워크(학교 와이파이)를 확인하세요."
+        ) from e
+    if not doc.exists:
+        raise ValueError(f"역할 정보(users/{uid})가 없습니다. 관리자에게 문의하세요.")
+    profile = doc.to_dict()
     return {
         "uid": uid,
         "email": decoded.get("email", ""),
@@ -66,9 +79,11 @@ def sign_up(email: str, password: str, name: str) -> None:
     })
 
 
-def sign_in(email: str, password: str) -> dict:
+def sign_in(email: str, password: str, status=None) -> dict:
+    if status:
+        status.write("1/3 Firebase에 비밀번호 확인 중...")
     data = _call("signInWithPassword", email, password)
-    user = _load_user(data["idToken"])
+    user = _load_user(data["idToken"], status)
     st.session_state["user"] = user
     return user
 
@@ -92,11 +107,20 @@ def login_page() -> None:
             email = st.text_input("이메일")
             pw = st.text_input("비밀번호", type="password")
             if st.form_submit_button("로그인", use_container_width=True):
-                try:
-                    sign_in(email, pw)
+                ok = False
+                with st.status("로그인 중...", expanded=True) as status:
+                    try:
+                        sign_in(email.strip(), pw, status)
+                        status.update(label="로그인 성공", state="complete")
+                        ok = True
+                    except ValueError as e:
+                        status.update(label="로그인 실패", state="error")
+                        st.error(str(e))
+                    except Exception as e:
+                        status.update(label="로그인 실패 (예상하지 못한 오류)", state="error")
+                        st.exception(e)
+                if ok:
                     st.rerun()
-                except ValueError as e:
-                    st.error(str(e))
     with tab_up:
         with st.form("signup"):
             name = st.text_input("이름")
